@@ -5,7 +5,7 @@ import numpy as np, pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="Segmentasi Pola Penjualan", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Segmentasi Pola Penjualan", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
 DATA = Path(__file__).parent / "dashboard_data"
 C1, C2, INK, MUT = "#1d4ed8", "#e8890c", "#0f1b2d", "#5b6678"
 COL = {1: C1, 2: C2}
@@ -16,9 +16,6 @@ st.markdown("""<style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html,body,[class*="css"]{font-family:'Inter',system-ui,sans-serif}
 .block-container{max-width:1200px;padding-top:1.6rem}
-[data-testid="stSidebar"]{background:#0b1730}
-[data-testid="stSidebar"] *{color:#dbe5fb!important}
-.brand{font-weight:700;font-size:1.05rem;letter-spacing:-.01em;margin:4px 0 2px}.brand-s{font-size:.78rem;opacity:.7;margin-bottom:14px}
 h1{font-size:2.2rem!important;letter-spacing:-.03em;line-height:1.12!important}
 h2,h3{letter-spacing:-.02em}
 .sub{color:#5b6678;font-size:1.05rem;max-width:760px;margin:-.4rem 0 1.4rem}
@@ -35,6 +32,11 @@ h2,h3{letter-spacing:-.02em}
 .step b{display:block;color:#1d4ed8;font-size:.76rem;margin-bottom:2px}
 .note{background:#fff7e8;border:1px solid #f3dcae;border-radius:10px;padding:12px 16px;font-size:.9rem}
 .stTabs [data-baseweb="tab"]{font-weight:600;padding:10px 18px}
+[data-testid="stPlotlyChart"],[data-testid="stDataFrame"]{background:#fff;border:1px solid #e3e7ee;border-radius:14px;padding:10px;box-shadow:0 1px 2px rgba(15,27,45,.04)}
+[data-testid="stHeader"]{background:rgba(255,255,255,.92);border-bottom:1px solid #e3e7ee}
+.ph{border-bottom:1px solid #e3e7ee;margin:0 0 26px;padding-bottom:16px}.ph h1{margin:0 0 6px!important}.ph p{color:#5b6678;font-size:1.05rem;max-width:780px;margin:0}
+.foot{margin-top:56px;padding-top:16px;border-top:1px solid #e3e7ee;color:#8893a5;font-size:.8rem;text-align:center}
+[data-testid="stSelectbox"] label p{font-weight:600}
 </style>""", unsafe_allow_html=True)
 
 
@@ -84,7 +86,7 @@ def kpi(col, v, t):
 
 
 def head(t, s):
-    st.markdown(f"# {t}"); st.markdown(f'<p class="sub">{s}</p>', unsafe_allow_html=True)
+    st.markdown(f'<div class="ph"><h1>{t}</h1><p>{s}</p></div>', unsafe_allow_html=True)
 
 
 def best(m):
@@ -174,6 +176,11 @@ def page_ringkasan():
     kpi(c[2], f"{int((X == 0).mean(1).__gt__(.5).sum())}", "Produk dengan lebih dari 50% minggu kosong")
     kpi(c[3], f"{META['dtw']['silhouette']:.3f}", "Silhouette tertinggi (DTW)")
     st.write("")
+    st.subheader("Alur analisis")
+    fl = [("Data mentah", f"{N} produk × {M} minggu"), ("Z-score", "menyamakan skala"), ("Matriks jarak", "DTW, DDTW, SBD"),
+          ("Clustering", "K-Medoids dan K-Shape"), ("Evaluasi", "silhouette dan ARI"), ("Segmen bisnis", "ADI, CV² dan ABC")]
+    st.markdown('<div class="flow">' + "".join(f'<div class="step"><b>Tahap {i}</b>{t}<br><span style="color:#5b6678">{d}</span></div>'
+                                             for i, (t, d) in enumerate(fl, 1)) + '</div>', unsafe_allow_html=True)
     T = demand_table(); hi = S["Cluster_DTW"].map({k: label("dtw", k) for k in (1, 2)}) == "Volume tinggi"
     share = X[hi.to_numpy()].sum() / X.sum() * 100
     f1, f2, f3 = st.columns(3)
@@ -459,8 +466,24 @@ def page_rumus():
     st.download_button("product_features.csv", F.to_csv(index=False), "product_features.csv", "text/csv")
 
 
-PAGES = {"Ringkasan": page_ringkasan, "Data": page_data, "Segmentasi produk": page_segmen, NM["dtw"]: lambda: page_method("dtw"),
-         NM["ddtw"]: lambda: page_method("ddtw"), NM["ks"]: lambda: page_method("ks"), "Perbandingan": page_banding,
-         "Lab metode": page_lab, "Jelajah produk": page_produk, "Rumus dan unduh": page_rumus}
-st.sidebar.markdown('<div class="brand">Time Series Clustering</div><div class="brand-s">Segmentasi pola penjualan produk</div>', unsafe_allow_html=True)
-PAGES[st.sidebar.radio("Navigasi", list(PAGES), label_visibility="collapsed")]()
+def page_detail():
+    a, _ = st.columns([2, 3])
+    m = a.selectbox("Pilih metode", list(NM), format_func=NM.get)
+    page_method(m)
+
+
+def mk(fn, title, path, default=False):
+    def run():
+        fn()
+        st.markdown(f'<div class="foot">Time Series Clustering · {N} produk × {M} minggu · Sumber: Sales_transaction.csv</div>',
+                    unsafe_allow_html=True)
+    return st.Page(run, title=title, url_path=path, default=default)
+
+
+nav = st.navigation({
+    "Beranda": [mk(page_ringkasan, "Ringkasan", "ringkasan", True), mk(page_data, "Data", "data")],
+    "Metode": [mk(page_detail, "Detail metode", "metode"), mk(page_banding, "Perbandingan metode", "perbandingan"),
+               mk(page_lab, "Lab metode", "lab"), mk(page_rumus, "Rumus dan unduh", "rumus")],
+    "Segmentasi": [mk(page_segmen, "Segmentasi produk", "segmentasi"), mk(page_produk, "Jelajah produk", "produk")],
+}, position="top")
+nav.run()
