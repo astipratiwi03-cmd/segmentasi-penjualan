@@ -1,537 +1,308 @@
-import os
 # -*- coding: utf-8 -*-
-"""
-Dashboard bisnis untuk segmentasi penjualan produk mingguan.
-Sumber utama: dashboard_data/sales_clusters.csv (nilai penjualan asli W0-W51
-+ label cluster), product_features.csv, summary.json, cross_silhouette.csv,
-dan ari.csv. File evaluasi tambahan bersifat opsional.
-"""
-import json
+import json, glob
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
-import plotly.express as px
+import numpy as np, pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(
-    page_title="Product Portfolio | Sales Review",
-    page_icon="▦",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Segmentasi Pola Penjualan", page_icon="📈", layout="wide")
+DATA = Path(__file__).parent / "dashboard_data"
+C1, C2, INK, MUT = "#1d4ed8", "#e8890c", "#0f1b2d", "#5b6678"
+COL = {1: C1, 2: C2}
+NM = {"dtw": "K-Medoids + DTW", "ddtw": "K-Medoids + DDTW", "ks": "K-Shape + SBD"}
+CL = {"dtw": "Cluster_DTW", "ddtw": "Cluster_DDTW", "ks": "Cluster_KShape"}
 
-# --------------------------- Visual system ---------------------------
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
-:root {
-  --ink:#202923; --muted:#68736b; --line:#e4e7df; --paper:#f6f6f1;
-  --white:#ffffff; --green:#315d45; --green2:#547b5e; --lime:#dce8d7;
-  --amber:#c18a3b; --red:#a95645; --blue:#647d8c;
-}
-html, body, [class*="css"] {font-family:'Inter',sans-serif;color:var(--ink);}
-.stApp {background:var(--paper);}
-.block-container {max-width:1500px;padding-top:1.5rem;padding-bottom:3rem;}
-h1,h2,h3 {color:var(--ink)!important;letter-spacing:-.035em;}
-h1 {font-size:2.15rem!important;font-weight:700!important;}
-h2 {font-size:1.42rem!important;font-weight:700!important;margin-top:.3rem;}
-h3 {font-size:1.02rem!important;font-weight:650!important;}
-p,li,label {color:var(--ink);}
-[data-testid="stSidebar"] {background:#263b30;}
-[data-testid="stSidebar"] * {color:#f4f5ef!important;}
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {color:#d5dfd6!important;}
-[data-testid="stMetric"] {
-  background:#fff;border:1px solid var(--line);border-radius:5px;
-  padding:15px 17px;box-shadow:none;
-}
-[data-testid="stMetricLabel"] {color:#68736b!important;font-size:.78rem!important;}
-[data-testid="stMetricValue"] {color:#263b30!important;font-size:1.75rem!important;font-weight:700!important;}
-[data-testid="stMetricDelta"] {font-size:.76rem!important;}
-div[data-testid="stTabs"] button {font-weight:600;color:#657067!important;}
-div[data-testid="stTabs"] button[aria-selected="true"] {color:#315d45!important;border-bottom-color:#315d45!important;}
-div[data-testid="stDataFrame"] {border:1px solid var(--line);border-radius:4px;}
-div.stButton>button, div.stDownloadButton>button {border-radius:4px;font-weight:600;}
-hr {border-color:var(--line)!important;}
-.kicker {font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:#6c7b6e;font-weight:700;margin-bottom:.35rem;}
-.deck {font-size:1rem;color:#59645c;line-height:1.65;max-width:980px;margin-bottom:1rem;}
-.rule {border-top:1px solid #dfe4db;margin:1rem 0 1.25rem 0;}
-.insight {background:#edf2e9;border-left:3px solid #547b5e;padding:13px 16px;margin:.4rem 0 1rem 0;line-height:1.55;}
-.warning-note {background:#f5eee3;border-left:3px solid #c18a3b;padding:13px 16px;margin:.4rem 0 1rem 0;line-height:1.55;}
-.mono {font-family:'DM Mono',monospace;}
-.small {font-size:.82rem;color:#68736b;}
-div[data-testid="stSelectbox"] label, div[data-testid="stMultiSelect"] label {font-weight:600;}
-</style>
-""", unsafe_allow_html=True)
+st.markdown("""<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+html,body,[class*="css"]{font-family:'Inter',system-ui,sans-serif}
+.block-container{max-width:1180px;padding-top:2rem}
+[data-testid="stSidebar"]{background:#fff;border-right:1px solid #e3e7ee}
+h1{font-size:2.5rem!important;letter-spacing:-.03em;line-height:1.1!important}
+h2,h3{letter-spacing:-.02em}
+.sub{color:#5b6678;font-size:1.05rem;max-width:760px;margin:-.4rem 0 1.4rem}
+.kpi{background:#fff;border:1px solid #e3e7ee;border-radius:14px;padding:18px 20px}
+.kpi b{display:block;font-size:1.9rem;letter-spacing:-.02em;color:#0f1b2d}.kpi span{color:#5b6678;font-size:.85rem}
+.note{background:#fff7e8;border:1px solid #f3dcae;border-radius:10px;padding:12px 16px;font-size:.9rem}
+.pill{display:inline-block;padding:2px 12px;border-radius:99px;color:#fff;font-size:.8rem;font-weight:600}
+</style>""", unsafe_allow_html=True)
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "dashboard_data"
-REQUIRED = ["sales_clusters.csv", "product_features.csv", "summary.json"]
 
 @st.cache_data
-def load_data():
-    missing = [x for x in REQUIRED if not (DATA / x).exists()]
-    if missing:
-        raise FileNotFoundError("File belum ditemukan: " + ", ".join(missing))
-    sales = pd.read_csv(DATA / "sales_clusters.csv")
-    features = pd.read_csv(DATA / "product_features.csv")
-    meta = json.loads((DATA / "summary.json").read_text(encoding="utf-8"))
-    optional = {}
-    for name, filename in {
-        "cross": "cross_silhouette.csv", "ari": "ari.csv",
-        "projection": "projection_2d.csv", "product_sil": "product_silhouette.csv",
-        "medoids": "medoids.csv"
-    }.items():
-        path = DATA / filename
-        if path.exists():
-            try:
-                optional[name] = pd.read_csv(path, index_col=0) if name in ("cross", "ari") else pd.read_csv(path)
-            except Exception:
-                optional[name] = None
-    return sales, features, meta, optional
+def load():
+    d = {"s": pd.read_csv(DATA / "sales_clusters.csv"), "f": pd.read_csv(DATA / "product_features.csv"),
+         "meta": json.load(open(DATA / "summary.json"))}
+    for n in ["k_curve_dtw", "k_curve_ddtw", "evaluation_dtw", "evaluation_ddtw", "evaluation_kshape", "medoids"]:
+        p = DATA / f"{n}.csv"
+        d[n] = pd.read_csv(p) if p.exists() else None
+    for n in ["cross_silhouette", "ari"]:
+        p = DATA / f"{n}.csv"
+        d[n] = pd.read_csv(p, index_col=0) if p.exists() else None
+    for n in ["medoid_patterns_dtw", "medoid_patterns_ddtw", "kshape_centroids"]:
+        p = DATA / f"{n}.npy"
+        d[n] = np.squeeze(np.load(p)) if p.exists() else None
+    pj = glob.glob(str(DATA / "*proj*.csv"))
+    d["proj"] = pd.read_csv(pj[0]) if pj else None
+    return d
 
-try:
-    sales, features, meta, optional = load_data()
-except Exception as exc:
-    st.error(f"Data dashboard belum siap: {exc}")
-    st.info("Pastikan app.py berada di /content dan folder dashboard_data berada di /content/dashboard_data.")
-    st.stop()
 
-WEEKS = sorted(
-    [c for c in sales.columns if c.startswith("W") and c[1:].isdigit()],
-    key=lambda x: int(x[1:])
-)
-if not WEEKS:
-    st.error("Kolom penjualan mingguan W0, W1, ... tidak ditemukan pada sales_clusters.csv.")
-    st.stop()
+D = load()
+S, F, META = D["s"], D["f"], D["meta"]
+WK = [c for c in S.columns if c.startswith("W") and c[1:].isdigit()]
+X = S[WK].to_numpy(float)
+N, M = X.shape
+fid = "product_id" if "product_id" in F.columns else F.columns[0]
+FE = F.merge(S[["Product_Code"] + list(CL.values())], left_on=fid, right_on="Product_Code")
 
-METHODS = {
-    "K-Medoids + DTW": ("Cluster_DTW", "dtw", "DTW"),
-    "K-Medoids + DDTW": ("Cluster_DDTW", "ddtw", "DDTW"),
-    "K-Shape + SBD": ("Cluster_KShape", "kshape", "SBD"),
-}
-METHOD_NAMES = list(METHODS)
-PALETTE = ["#315d45", "#c18a3b", "#647d8c", "#a95645", "#8a7799"]
 
-def fmt(x, d=1):
-    try:
-        if pd.isna(x): return "—"
-        return f"{float(x):,.{d}f}"
-    except Exception:
-        return "—"
+def label(m, c):
+    """Cluster dengan rata-rata penjualan lebih tinggi disebut volume tinggi."""
+    mu = {k: X[S[CL[m]] == k].mean() for k in (1, 2)}
+    return "Volume tinggi" if mu[c] == max(mu.values()) else "Volume rendah / intermiten"
 
-def plot_style(fig, height=350, legend=True):
-    fig.update_layout(
-        template="plotly_white", height=height,
-        paper_bgcolor="#ffffff", plot_bgcolor="#ffffff",
-        font=dict(family="Inter", color="#344139", size=11),
-        margin=dict(l=18, r=18, t=48, b=20),
-        title=dict(font=dict(size=14, color="#263b30")),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="left", x=0, bgcolor="rgba(255,255,255,0)"),
-        showlegend=legend,
-        hoverlabel=dict(bgcolor="#263b30", font_color="white"),
-    )
-    fig.update_xaxes(showgrid=False, linecolor="#dfe4db", tickfont=dict(color="#68736b"))
-    fig.update_yaxes(gridcolor="#edf0ea", zerolinecolor="#dfe4db", tickfont=dict(color="#68736b"))
+
+def style(fig, h=340):
+    fig.update_layout(template="simple_white", height=h, margin=dict(l=10, r=10, t=30, b=10),
+                      font=dict(family="Inter", color=INK), legend=dict(orientation="h", y=-.2),
+                      plot_bgcolor="white", paper_bgcolor="white")
+    fig.update_xaxes(gridcolor="#eef1f6"); fig.update_yaxes(gridcolor="#eef1f6")
     return fig
 
-def feature_for(product_ids):
-    if "product_id" not in features.columns:
-        return pd.DataFrame()
-    return features[features["product_id"].astype(str).isin([str(x) for x in product_ids])].copy()
 
-def get_cluster_frame(method):
-    label_col, _, _ = METHODS[method]
-    if label_col not in sales.columns:
-        return None, label_col
-    out = sales[["Product_Code"] + WEEKS + [label_col]].copy()
-    out = out.rename(columns={label_col: "Cluster"})
-    out["Cluster"] = pd.to_numeric(out["Cluster"], errors="coerce").fillna(-1).astype(int)
-    return out, label_col
+def kpi(col, v, t):
+    col.markdown(f'<div class="kpi"><b>{v}</b><span>{t}</span></div>', unsafe_allow_html=True)
 
-def calc_product_metrics(frame):
-    x = frame[WEEKS].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(float)
-    means = x.mean(axis=1)
-    stds = x.std(axis=1, ddof=1)
-    return pd.DataFrame({
-        "Product_Code": frame["Product_Code"].astype(str).values,
-        "Total 52 minggu": x.sum(axis=1),
-        "Rata-rata/minggu": means,
-        "Maksimum mingguan": x.max(axis=1),
-        "Minggu tanpa penjualan (%)": (x == 0).mean(axis=1) * 100,
-        "CV": np.divide(stds, means, out=np.full_like(stds, np.nan), where=means != 0),
-        "Simpangan baku": stds,
-    })
 
-raw_metrics = calc_product_metrics(sales)
-raw = sales[WEEKS].apply(pd.to_numeric, errors="coerce").fillna(0).to_numpy(float)
-n_products, n_weeks = raw.shape
-total_units = float(raw.sum())
-weekly_totals = raw.sum(axis=0)
-product_metrics = raw_metrics.copy()
-top_products = product_metrics.sort_values("Total 52 minggu", ascending=False)
-total_by_week = pd.DataFrame({"Minggu": np.arange(n_weeks), "Unit terjual": weekly_totals})
-overall_mean = raw.mean()
-zero_share = float((raw == 0).mean() * 100)
-best_product = top_products.iloc[0]
+def head(t, s):
+    st.markdown(f"# {t}"); st.markdown(f'<p class="sub">{s}</p>', unsafe_allow_html=True)
 
-# --------------------------- Sidebar ---------------------------
-with st.sidebar:
-    st.markdown("## PRODUCT PORTFOLIO")
-    st.markdown("**Sales performance review**")
-    st.markdown('<div class="small">52-week product demand · clustering analysis</div>', unsafe_allow_html=True)
-    st.markdown("---")
-    page = st.radio(
-        "NAVIGASI",
-        ["Ikhtisar bisnis", "Eksplorasi data asli", "Peluang & risiko produk",
-         "Segmentasi produk", "Tinjau satu produk", "Evaluasi metode"],
-        label_visibility="visible"
-    )
-    st.markdown("---")
-    method = st.selectbox("Metode segmentasi", METHOD_NAMES, index=0)
-    st.markdown('<div class="small">Metode hanya mengubah label cluster. Angka penjualan dan EDA selalu memakai unit asli.</div>', unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown('<div class="small">SUMBER<br>Data penjualan mingguan dan hasil clustering dari notebook.</div>', unsafe_allow_html=True)
 
-cluster_frame, label_col = get_cluster_frame(method)
-if cluster_frame is None:
-    st.error(f"Kolom {label_col} tidak tersedia. Periksa file sales_clusters.csv.")
-    st.stop()
-cluster_count = int(cluster_frame["Cluster"].nunique())
-method_key = METHODS[method][1]
-method_meta = meta.get(method_key, {})
-silhouette = method_meta.get("silhouette", np.nan)
+def best(m):
+    b = META[m]
+    return b["silhouette"], b["k"], b.get("window")
 
-# --------------------------- Page 1 ---------------------------
-if page == "Ikhtisar bisnis":
-    st.markdown('<div class="kicker">WEEKLY SALES / MANAGEMENT VIEW</div>', unsafe_allow_html=True)
-    st.title("Tinjauan kinerja portofolio produk")
-    st.markdown('<div class="deck">Ringkasan permintaan selama 52 minggu untuk membantu tim menentukan produk yang perlu dijaga ketersediaannya, ditinjau ulang, atau dipantau lebih dekat.</div>', unsafe_allow_html=True)
 
-    a,b,c,d = st.columns(4)
-    a.metric("Total unit terjual", f"{total_units:,.0f}")
-    b.metric("Produk dalam portofolio", f"{n_products:,}")
-    c.metric("Rata-rata unit / produk / minggu", f"{overall_mean:,.1f}")
-    d.metric("Minggu-produk tanpa penjualan", f"{zero_share:.1f}%")
-
-    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
-    left, right = st.columns([1.55, 1])
-    with left:
-        st.markdown("### Ritme penjualan mingguan")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=total_by_week["Minggu"], y=total_by_week["Unit terjual"],
-            mode="lines+markers", line=dict(color="#315d45", width=2.8),
-            marker=dict(size=5), fill="tozeroy", fillcolor="rgba(49,93,69,.09)",
-            hovertemplate="Minggu %{x}<br>%{y:,.0f} unit<extra></extra>"
-        ))
-        fig.update_layout(xaxis_title="Minggu observasi", yaxis_title="Total unit terjual")
-        st.plotly_chart(plot_style(fig, 350, False), use_container_width=True)
-        st.caption("Grafik menggunakan volume penjualan asli, bukan data z-score.")
-    with right:
-        st.markdown("### Konsentrasi penjualan")
-        top10_share = top_products.head(10)["Total 52 minggu"].sum() / total_units * 100 if total_units else 0
-        top20_share = top_products.head(20)["Total 52 minggu"].sum() / total_units * 100 if total_units else 0
-        st.metric("Kontribusi 10 produk teratas", f"{top10_share:.1f}%")
-        st.metric("Kontribusi 20 produk teratas", f"{top20_share:.1f}%")
-        st.markdown('<div class="insight"><b>Produk dengan volume tertinggi</b><br>'
-                    f'<span class="mono">{best_product["Product_Code"]}</span> mencatat '
-                    f'<b>{best_product["Total 52 minggu"]:,.0f} unit</b> selama periode pengamatan. '
-                    'Periksa kestabilan dan frekuensi penjualannya sebelum menetapkan prioritas stok.</div>',
-                    unsafe_allow_html=True)
-        st.markdown("### Metode segmentasi aktif")
-        st.write(f"**{method}** · {cluster_count} cluster")
-        st.write(f"Silhouette: **{fmt(silhouette, 3)}**")
-        st.caption("Silhouette dipakai untuk menilai pemisahan cluster, bukan ukuran kinerja penjualan.")
-    st.markdown("### Produk dengan volume terbesar")
-    display_top = top_products.head(10).copy()
-    st.dataframe(display_top, use_container_width=True, hide_index=True)
-    st.markdown('<div class="warning-note"><b>Catatan untuk keputusan:</b> data ini menggambarkan penjualan historis. '
-                'Dashboard tidak mengetahui stok tersedia, margin, lead time, atau kejadian promosi. '
-                'Karena itu, prioritas persediaan di bawah merupakan sinyal untuk ditinjau, bukan rekomendasi jumlah pemesanan.</div>',
-                unsafe_allow_html=True)
-
-# --------------------------- Page 2 ---------------------------
-elif page == "Eksplorasi data asli":
-    st.markdown('<div class="kicker">RAW DATA / EXPLORATORY REVIEW</div>', unsafe_allow_html=True)
-    st.title("Eksplorasi penjualan asli")
-    st.markdown('<div class="deck">Bagian ini memeriksa data unit terjual per produk pada W0–W51 sebelum normalisasi dan clustering. Semua angka di halaman ini berada pada skala penjualan asli.</div>', unsafe_allow_html=True)
-
-    # Data quality checks
-    missing_count = int(sales[WEEKS].isna().sum().sum())
-    negative_count = int((raw < 0).sum())
-    duplicate_count = int(sales["Product_Code"].duplicated().sum())
-    q1, q3 = product_metrics["Total 52 minggu"].quantile([.25, .75])
-    iqr = q3 - q1
-    upper = q3 + 1.5 * iqr
-    outlier_count = int((product_metrics["Total 52 minggu"] > upper).sum())
-
-    a,b,c,d,e = st.columns(5)
-    a.metric("Produk unik", f"{sales['Product_Code'].nunique():,}")
-    b.metric("Kolom minggu", f"{n_weeks}")
-    c.metric("Nilai hilang", f"{missing_count:,}")
-    d.metric("Nilai negatif", f"{negative_count:,}")
-    e.metric("Outlier total (IQR)", f"{outlier_count:,}")
-
-    st.markdown("### Ringkasan distribusi seluruh observasi")
-    desc = pd.Series(raw.ravel(), name="Unit terjual").describe()
-    cols = st.columns(6)
-    for col, (lab, val) in zip(cols, [
-        ("Observasi", desc["count"]), ("Rata-rata", desc["mean"]),
-        ("Median", desc["50%"]), ("Simpangan baku", desc["std"]),
-        ("Minimum", desc["min"]), ("Maksimum", desc["max"])
-    ]):
-        col.metric(lab, f"{val:,.2f}" if lab in ("Rata-rata","Simpangan baku") else f"{val:,.0f}")
-
-    st.markdown("### Bagaimana distribusi permintaan?")
-    l,r = st.columns(2)
-    with l:
-        fig = px.histogram(product_metrics, x="Total 52 minggu", nbins=40,
-                           title="Sebaran total unit per produk")
-        fig.update_traces(marker_color="#547b5e", opacity=.9)
-        fig.update_layout(xaxis_title="Total unit selama 52 minggu", yaxis_title="Jumlah produk")
-        st.plotly_chart(plot_style(fig, 330, False), use_container_width=True)
-    with r:
-        zero_dist = product_metrics.copy()
-        fig = px.histogram(zero_dist, x="Minggu tanpa penjualan (%)", nbins=25,
-                           title="Frekuensi minggu tanpa penjualan")
-        fig.update_traces(marker_color="#c18a3b", opacity=.9)
-        fig.update_layout(xaxis_title="Minggu tanpa penjualan (%)", yaxis_title="Jumlah produk")
-        st.plotly_chart(plot_style(fig, 330, False), use_container_width=True)
-
-    l,r = st.columns(2)
-    with l:
-        fig = px.box(product_metrics, y="Total 52 minggu", points="outliers",
-                     title="Rentang total penjualan antarproduk")
-        fig.update_traces(marker_color="#547b5e", line_color="#315d45")
-        st.plotly_chart(plot_style(fig, 320, False), use_container_width=True)
-    with r:
-        fig = px.scatter(
-            product_metrics, x="Rata-rata/minggu", y="CV",
-            size="Total 52 minggu", color="Minggu tanpa penjualan (%)",
-            hover_name="Product_Code", color_continuous_scale=["#dce8d7","#c18a3b","#a95645"],
-            title="Volume rata-rata dan ketidakstabilan permintaan",
-            labels={"Rata-rata/minggu":"Rata-rata unit / minggu","CV":"CV","Minggu tanpa penjualan (%)":"Minggu nol (%)"}
-        )
-        st.plotly_chart(plot_style(fig, 340, False), use_container_width=True)
-
-    st.markdown("### Total penjualan dari minggu ke minggu")
-    weekly = pd.DataFrame({"Minggu": np.arange(n_weeks), "Total unit": raw.sum(axis=0),
-                           "Rata-rata per produk": raw.mean(axis=0)})
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=weekly["Minggu"], y=weekly["Total unit"], name="Total unit", marker_color="#547b5e"))
-    fig.add_trace(go.Scatter(x=weekly["Minggu"], y=weekly["Rata-rata per produk"], name="Rata-rata per produk",
-                             yaxis="y2", line=dict(color="#c18a3b", width=2.5)))
-    fig.update_layout(
-        title="Aktivitas penjualan per minggu", xaxis_title="Minggu observasi",
-        yaxis=dict(title="Total unit"), yaxis2=dict(title="Rata-rata unit / produk", overlaying="y", side="right"),
-        legend=dict(orientation="h", y=1.12)
-    )
-    st.plotly_chart(plot_style(fig, 390), use_container_width=True)
-
-    st.markdown("### Telusuri data penjualan per produk")
-    product_choice = st.selectbox("Pilih produk", sales["Product_Code"].astype(str).tolist(), key="raw_eda_product")
-    prow = sales[sales["Product_Code"].astype(str) == product_choice].iloc[0]
-    values = pd.to_numeric(prow[WEEKS], errors="coerce").fillna(0).to_numpy(float)
-    fig = go.Figure(go.Bar(x=np.arange(n_weeks), y=values, marker_color="#547b5e",
-                           hovertemplate="Minggu %{x}<br>%{y} unit<extra></extra>"))
-    fig.update_layout(title=f"Penjualan mingguan · {product_choice}", xaxis_title="Minggu", yaxis_title="Unit terjual")
-    st.plotly_chart(plot_style(fig, 300, False), use_container_width=True)
-    st.dataframe(pd.DataFrame({"Minggu": [f"W{i}" for i in range(n_weeks)], "Unit terjual": values}),
-                 use_container_width=True, hide_index=True, height=230)
-
-    st.markdown("### Pemeriksaan data")
-    quality = pd.DataFrame([
-        ["Jumlah produk", len(sales)], ["Duplikasi kode produk", duplicate_count],
-        ["Nilai kosong pada kolom minggu", missing_count], ["Nilai penjualan negatif", negative_count],
-        ["Persentase observasi bernilai nol", zero_share]
-    ], columns=["Pemeriksaan", "Hasil"])
-    st.dataframe(quality, use_container_width=True, hide_index=True)
-
-# --------------------------- Page 3 ---------------------------
-elif page == "Peluang & risiko produk":
-    st.markdown('<div class="kicker">PORTFOLIO ACTION / PRODUCT PRIORITIES</div>', unsafe_allow_html=True)
-    st.title("Peluang dan risiko produk")
-    st.markdown('<div class="deck">Gunakan kombinasi volume, konsistensi, dan frekuensi minggu nol untuk menyusun daftar produk yang perlu diperiksa lebih lanjut.</div>', unsafe_allow_html=True)
-
-    m = product_metrics.copy()
-    p75 = m["Total 52 minggu"].quantile(.75)
-    med_cv = m["CV"].median()
-    high_volume = m[m["Total 52 minggu"] >= p75].sort_values("Total 52 minggu", ascending=False)
-    unstable = m[(m["CV"] >= med_cv) & (m["Rata-rata/minggu"] > 0)].sort_values("CV", ascending=False)
-    intermittent = m[m["Minggu tanpa penjualan (%)"] >= 50].sort_values("Total 52 minggu", ascending=False)
-    declining_ids = []
-    # Linear trend on original units; descriptive only
-    slopes = np.polyfit(np.arange(n_weeks), raw.T, 1)[0]
-    trend_table = pd.DataFrame({"Product_Code": sales["Product_Code"].astype(str), "Slope": slopes})
-    declining = trend_table[trend_table["Slope"] < 0].sort_values("Slope").head(20)
-
-    a,b,c,d = st.columns(4)
-    a.metric("Produk volume tinggi", f"{len(high_volume):,}", "≥ kuartil 3 total")
-    b.metric("Produk CV di atas median", f"{len(unstable):,}")
-    c.metric("Produk ≥50% minggu nol", f"{len(intermittent):,}")
-    d.metric("Produk dengan tren linear turun", f"{(trend_table.Slope < 0).sum():,}")
-
-    st.markdown("### Daftar tinjauan operasional")
-    tab1,tab2,tab3,tab4 = st.tabs(["Jaga ketersediaan", "Permintaan tidak stabil", "Penjualan intermiten", "Tren menurun"])
-    with tab1:
-        st.write("Produk bervolume tinggi layak masuk daftar pemantauan ketersediaan. Ini belum membuktikan produk paling menguntungkan karena data margin dan stok tidak tersedia.")
-        st.dataframe(high_volume.head(30), use_container_width=True, hide_index=True)
-    with tab2:
-        st.write("Variabilitas tinggi dapat membuat kebutuhan persediaan berubah tajam. Tinjau kalender promosi, lead time, dan pola lonjakan.")
-        st.dataframe(unstable.head(30), use_container_width=True, hide_index=True)
-    with tab3:
-        st.write("Minggu tanpa penjualan yang sering dapat menunjukkan permintaan jarang, musiman, atau ketersediaan yang tidak konsisten. Perlu verifikasi dengan data stok.")
-        st.dataframe(intermittent.head(30), use_container_width=True, hide_index=True)
-    with tab4:
-        st.write("Kemiringan dihitung dengan regresi linear sederhana pada 52 minggu. Ini sinyal awal, bukan uji signifikansi atau ramalan.")
-        st.dataframe(declining.merge(product_metrics, on="Product_Code", how="left"), use_container_width=True, hide_index=True)
-
-    st.markdown('<div class="warning-note"><b>Batasan bisnis:</b> data yang tersedia hanya unit terjual per minggu. '
-                'Dashboard tidak memiliki harga, margin, stok, stockout, biaya simpan, promosi, maupun lead time. '
-                'Jangan menafsirkan volume tinggi sebagai laba tinggi atau minggu nol sebagai bukti tidak ada permintaan.</div>',
-                unsafe_allow_html=True)
-
-# --------------------------- Page 4 ---------------------------
-elif page == "Segmentasi produk":
-    st.markdown('<div class="kicker">PRODUCT SEGMENTS / CLUSTER PROFILE</div>', unsafe_allow_html=True)
-    st.title("Segmentasi pola penjualan")
-    st.markdown('<div class="deck">Cluster mengelompokkan produk berdasarkan kemiripan pola mingguan. Gunakan profil penjualan asli untuk memberi arti operasional pada tiap kelompok.</div>', unsafe_allow_html=True)
-
-    sizes = cluster_frame["Cluster"].value_counts().sort_index()
-    a,b,c = st.columns(3)
-    a.metric("Jumlah cluster", f"{len(sizes)}")
-    b.metric("Produk dalam cluster terbesar", f"{sizes.max():,}")
-    b.caption(f"Cluster {sizes.idxmax()}")
-    c.metric("Silhouette metode", fmt(silhouette, 3))
-    if pd.notna(silhouette) and float(silhouette) < .25:
-        st.markdown('<div class="warning-note"><b>Pemisahan cluster lemah.</b> Gunakan cluster sebagai ringkasan pola dominan, bukan batas kelompok yang tegas. Validasi hasil dengan kebutuhan bisnis.</div>', unsafe_allow_html=True)
-
-    st.markdown("### Ukuran dan karakter tiap cluster")
-    size_df = sizes.rename_axis("Cluster").reset_index(name="Jumlah produk")
-    size_df["Porsi portofolio (%)"] = size_df["Jumlah produk"] / n_products * 100
-    fig = px.bar(size_df, x="Cluster", y="Jumlah produk", text="Porsi portofolio (%)",
-                 color="Cluster", color_discrete_sequence=PALETTE,
-                 title="Jumlah produk per cluster")
-    fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-    st.plotly_chart(plot_style(fig, 320, False), use_container_width=True)
-
-    chosen = st.selectbox("Pilih cluster untuk ditinjau", sorted(sizes.index), key="cluster_profile")
-    part = cluster_frame[cluster_frame["Cluster"] == chosen].copy()
-    met = calc_product_metrics(part)
-    avg_pattern = part[WEEKS].mean(axis=0).to_numpy(float)
-    median_pattern = part[WEEKS].median(axis=0).to_numpy(float)
-    a,b,c,d = st.columns(4)
-    a.metric("Anggota", f"{len(part):,}")
-    b.metric("Rata-rata unit / minggu", fmt(met["Rata-rata/minggu"].mean(), 2))
-    c.metric("CV rata-rata", fmt(met["CV"].mean(), 2))
-    d.metric("Minggu nol rata-rata", f"{met['Minggu tanpa penjualan (%)'].mean():.1f}%")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=np.arange(n_weeks), y=avg_pattern, mode="lines",
-                             line=dict(color="#315d45", width=3.2), name="Rata-rata cluster"))
-    fig.add_trace(go.Scatter(x=np.arange(n_weeks), y=median_pattern, mode="lines",
-                             line=dict(color="#c18a3b", width=2, dash="dash"), name="Median cluster"))
-    fig.update_layout(title=f"Pola penjualan asli · Cluster {chosen}", xaxis_title="Minggu", yaxis_title="Unit terjual")
-    st.plotly_chart(plot_style(fig, 350), use_container_width=True)
-
-    # Business-readable profile text
-    mean_v = met["Rata-rata/minggu"].mean()
-    cv_v = met["CV"].mean()
-    zero_v = met["Minggu tanpa penjualan (%)"].mean()
-    if mean_v >= product_metrics["Rata-rata/minggu"].quantile(.75):
-        level = "volume relatif tinggi"
-        action = "periksa ketersediaan, frekuensi replenishment, dan risiko stockout."
-    elif mean_v <= product_metrics["Rata-rata/minggu"].quantile(.25):
-        level = "volume relatif rendah"
-        action = "tinjau kontribusi produk terhadap assortment dan biaya penyimpanannya."
-    else:
-        level = "volume menengah"
-        action = "atur pemantauan berkala dan bandingkan dengan kapasitas penyimpanan."
-    if zero_v >= 50:
-        pattern = "permintaan intermiten: setidaknya separuh minggu rata-rata tidak mencatat penjualan."
-        action += " Hindari mengandalkan rata-rata mingguan saja untuk menentukan pemesanan."
-    elif cv_v > 1.5:
-        pattern = "permintaan berfluktuasi tinggi."
-        action += " Tinjau periode lonjakan dan kemungkinan pengaruh promosi atau pasokan."
-    else:
-        pattern = "pola relatif lebih rutin dibanding kelompok dengan frekuensi nol atau CV lebih tinggi."
-    st.markdown(f'<div class="insight"><b>Ringkasan cluster {chosen}</b><br>Kelompok ini memiliki {level} dan {pattern}<br><b>Hal yang perlu ditinjau:</b> {action}</div>', unsafe_allow_html=True)
-
-    st.markdown("### Anggota cluster")
-    members = met.sort_values("Total 52 minggu", ascending=False)
-    st.dataframe(members, use_container_width=True, hide_index=True, height=350)
-    st.download_button("Unduh daftar anggota cluster (CSV)", members.to_csv(index=False).encode("utf-8"),
-                       file_name=f"cluster_{chosen}_{method_key}.csv", mime="text/csv")
-
-# --------------------------- Page 5 ---------------------------
-elif page == "Tinjau satu produk":
-    st.markdown('<div class="kicker">SKU REVIEW / PRODUCT DETAIL</div>', unsafe_allow_html=True)
-    st.title("Tinjau satu produk")
-    st.markdown('<div class="deck">Periksa riwayat unit terjual, konsistensi, dan posisi produk pada ketiga pendekatan clustering.</div>', unsafe_allow_html=True)
-    product = st.selectbox("Kode produk", sales["Product_Code"].astype(str).tolist())
-    row = sales[sales["Product_Code"].astype(str) == product].iloc[0]
-    pm = product_metrics[product_metrics["Product_Code"] == product].iloc[0]
-    a,b,c,d = st.columns(4)
-    a.metric("Total 52 minggu", f"{pm['Total 52 minggu']:,.0f} unit")
-    b.metric("Rata-rata per minggu", fmt(pm["Rata-rata/minggu"], 2))
-    c.metric("Minggu tanpa penjualan", f"{pm['Minggu tanpa penjualan (%)']:.1f}%")
-    d.metric("CV", fmt(pm["CV"], 2))
-    vals = pd.to_numeric(row[WEEKS], errors="coerce").fillna(0).to_numpy(float)
-    fig = go.Figure(go.Bar(x=np.arange(n_weeks), y=vals, marker_color="#547b5e"))
-    fig.update_layout(title=f"Riwayat unit terjual · {product}", xaxis_title="Minggu", yaxis_title="Unit terjual")
-    st.plotly_chart(plot_style(fig, 350, False), use_container_width=True)
-    st.markdown("### Penempatan cluster menurut metode")
-    boxes = st.columns(3)
-    for col, (name, (label, key, distance)) in zip(boxes, METHODS.items()):
-        value = row[label] if label in row.index else "—"
-        col.metric(name, f"Cluster {int(value)}" if pd.notna(value) else "Tidak tersedia")
-        if key in meta:
-            col.caption(f"Silhouette: {fmt(meta[key].get('silhouette'), 3)}")
-    st.markdown("### Ringkasan penjualan")
-    st.dataframe(pm.to_frame("Nilai"), use_container_width=True)
-
-# --------------------------- Page 6 ---------------------------
-elif page == "Evaluasi metode":
-    st.markdown('<div class="kicker">MODEL REVIEW / METHOD COMPARISON</div>', unsafe_allow_html=True)
-    st.title("Perbandingan metode clustering")
-    st.markdown('<div class="deck">Evaluasi ini membantu memilih representasi pola yang paling berguna. Kualitas pemisahan cluster perlu dibaca terpisah dari nilai penjualan dan manfaat operasional.</div>', unsafe_allow_html=True)
+# ---------------------------------------------------------------- halaman
+def page_ringkasan():
+    head("Pola penjualan mingguan 811 produk, dikelompokkan tiga cara",
+         "K-Medoids dengan DTW dan DDTW, serta K-Shape dengan SBD, dihitung pada 52 minggu penjualan.")
+    c = st.columns(4)
+    kpi(c[0], f"{N}", "Produk"); kpi(c[1], f"{M}", "Minggu per produk")
+    kpi(c[2], f"{(X == 0).mean() * 100:.1f}%", "Sel penjualan bernilai nol")
+    kpi(c[3], f"{META['dtw']['silhouette']:.3f}", "Silhouette tertinggi (DTW)")
+    st.write("")
     rows = []
-    for name, (_, key, distance) in METHODS.items():
-        info = meta.get(key, {})
-        rows.append({"Metode":name, "Jarak":distance, "Jumlah cluster (k)":info.get("k"),
-                     "Radius (minggu)":info.get("window", "—"), "Silhouette":info.get("silhouette")})
-    comp = pd.DataFrame(rows)
-    st.dataframe(comp, use_container_width=True, hide_index=True)
-    fig = px.bar(comp, x="Metode", y="Silhouette", color="Metode", color_discrete_sequence=PALETTE,
-                 text="Silhouette", title="Silhouette masing-masing metode")
-    fig.update_traces(texttemplate="%{text:.3f}", textposition="outside")
-    st.plotly_chart(plot_style(fig, 330, False), use_container_width=True)
+    for m, k in [("dtw", "dtw"), ("ddtw", "ddtw"), ("ks", "kshape")]:
+        s, kk, w = best(k)
+        sz = S[CL[m]].value_counts().sort_index()
+        rows.append({"Metode": NM[m], "Parameter": f"radius {w} minggu" if w is not None else "n_init 10",
+                     "k": kk, "Silhouette": round(s, 4), "Ukuran cluster": " / ".join(str(v) for v in sz)})
+    st.subheader("Perbandingan metode")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.markdown('<div class="note"><b>Kesimpulan.</b> K-Medoids + DTW memberi silhouette tertinggi, tetapi semua '
+                'metode berada di bawah 0,25. Produk tidak membentuk kelompok yang terpisah jelas. Perbedaan utama '
+                'antar-cluster adalah volume dan intermitensi penjualan.</div>', unsafe_allow_html=True)
 
-    if optional.get("cross") is not None:
-        st.markdown("### Silhouette lintas matriks jarak")
-        fig = px.imshow(optional["cross"], text_auto=".3f", aspect="auto",
-                        color_continuous_scale=["#f3f4ef","#b7cbb8","#315d45"],
-                        title="Label cluster dibandingkan pada matriks jarak")
-        st.plotly_chart(plot_style(fig, 330, True), use_container_width=True)
-    if optional.get("ari") is not None:
-        st.markdown("### Kesepakatan label antar-metode (ARI)")
-        fig = px.imshow(optional["ari"], text_auto=".3f", aspect="auto", zmin=0, zmax=1,
-                        color_continuous_scale=["#f3f4ef","#b7cbb8","#315d45"])
-        st.plotly_chart(plot_style(fig, 330, True), use_container_width=True)
-    st.markdown('<div class="warning-note"><b>Interpretasi:</b> silhouette rendah berarti kelompok belum terpisah kuat berdasarkan jarak yang digunakan. '
-                'Metode dengan silhouette terbesar tidak otomatis paling baik untuk bisnis. Periksa juga apakah profil cluster dapat diterjemahkan menjadi tindakan yang masuk akal.</div>',
-                unsafe_allow_html=True)
-    st.markdown("### Cara membaca metode")
-    method_notes = {
-        "K-Medoids + DTW": "Membandingkan deret dengan penyelarasan waktu lokal. Relevan ketika bentuk pola serupa muncul pada minggu yang sedikit bergeser.",
-        "K-Medoids + DDTW": "Membandingkan pola perubahan/kemiringan antarperiode. Perlu hati-hati karena turunan dapat memperbesar noise.",
-        "K-Shape + SBD": "Membandingkan bentuk deret dengan normalized cross-correlation. Skala volume harus diperiksa lagi menggunakan unit asli."
-    }
-    for name, note in method_notes.items():
-        st.markdown(f"**{name}.** {note}")
 
-st.markdown("---")
-st.caption("Product Portfolio | Sales Review · Analisis historis 52 minggu. Tidak mencakup margin, harga, stok, promosi, lead time, atau ramalan permintaan.")
+def page_data():
+    head("Data dan pra-pemrosesan",
+         "Setiap produk adalah satu deret waktu berpanjang m = 52 minggu. Jarak dihitung pada deret ter-normalisasi "
+         "agar yang dibandingkan adalah bentuk pola, bukan volume.")
+    a, b = st.columns(2)
+    with a:
+        st.subheader("Normalisasi z-score")
+        st.latex(r"z_t=\frac{x_t-\mu}{\sigma},\quad \mu=\frac1m\sum_{t=1}^{m}x_t,\quad "
+                 r"\sigma=\sqrt{\frac1m\sum_{t=1}^{m}(x_t-\mu)^2}")
+        st.write("Hasilnya rata-rata 0 dan simpangan baku 1 untuk tiap produk. Data asli tetap dipakai untuk profil "
+                 "cluster agar angka dapat dibaca dalam satuan unit.")
+    with b:
+        st.subheader("Total penjualan per minggu")
+        fig = go.Figure(go.Scatter(y=X.sum(0), x=list(range(1, M + 1)), mode="lines", line=dict(color=INK, width=2.5)))
+        st.plotly_chart(style(fig.update_layout(xaxis_title="Minggu", yaxis_title="Unit")), use_container_width=True)
+    st.subheader("Sebaran per produk")
+    st.dataframe(FE[[fid, "mean", "total_sales", "cv", "zero_proportion"]].describe().round(2), use_container_width=True)
+
+
+ALGO = {
+    "dtw": ("Mengelompokkan produk menurut kemiripan bentuk deret dengan toleransi pergeseran waktu kecil.",
+            ["Normalisasi z-score setiap deret.",
+             "Hitung jarak DTW semua pasangan produk pada radius Sakoe-Chiba r (matriks 811 × 811).",
+             "Grid search r (52 sampai 0 minggu) dan k = 2 sampai 8, masing-masing dengan K-Medoids (PAM).",
+             "Pilih silhouette tertinggi. Bila seri, pilih radius lalu k terkecil.",
+             "Ekstraksi fitur dari data asli untuk menafsirkan cluster."],
+            [(r"D(i,j)=(a_i-b_j)^2+\min\{D(i-1,j),\,D(i,j-1),\,D(i-1,j-1)\}",
+              "Rekursi pemrograman dinamis dengan D(0,0)=0. Jarak akhir d_DTW(a,b)=√D(m,m)."),
+             (r"|i-j|\le r", "Pita Sakoe-Chiba. r = 0 setara jarak Euclidean, r = 52 adalah DTW penuh."),
+             (r"m_c=\arg\min_{x\in C}\sum_{y\in C}d(x,y)",
+              "PAM: BUILD memilih medoid awal yang paling menurunkan biaya, SWAP menukar medoid dengan non-medoid "
+              "selama total biaya turun.")]),
+    "ddtw": ("Sama seperti DTW tetapi pada turunan deret: yang dibandingkan adalah arah dan laju perubahan.",
+             ["Normalisasi z-score setiap deret.", "Ubah tiap deret menjadi turunannya (panjang 52 menjadi 50).",
+              "Hitung jarak DTW pada turunan dengan radius 0 sampai 50.",
+              "Jalankan K-Medoids (PAM) untuk k = 2 sampai 8, pilih silhouette tertinggi.",
+              "Ekstraksi fitur dari data asli untuk profil cluster."],
+             [(r"a'_i=\frac{(a_i-a_{i-1})+(a_{i+1}-a_{i-1})/2}{2},\quad i=2,\dots,m-1",
+               "Turunan menurut Keogh dan Pazzani (2001): rata-rata kemiringan kiri dan kanan titik."),
+              (r"d_{DDTW}(a,b)=d_{DTW}(a',b')", "Rekursi DTW sama, inputnya deret turunan."),
+              (r"\text{derau}\uparrow", "Pada penjualan intermiten, turunan memperbesar lonjakan dan minggu nol, "
+                                         "sehingga pemisahan cenderung lebih lemah dari DTW.")]),
+    "ks": ("Mengelompokkan produk menurut bentuk yang tak terpengaruh pergeseran dan skala. Pusatnya berupa centroid "
+           "hasil ekstraksi bentuk.",
+           ["Normalisasi z-score setiap deret.", "Mulai dari penugasan cluster acak (n_init = 10, ambil inertia terkecil).",
+            "Perbarui centroid: selaraskan anggota dengan pergeseran optimal, lalu ekstraksi bentuk lewat vektor eigen.",
+            "Tugaskan ulang tiap produk ke centroid dengan SBD terkecil.",
+            "Ulangi langkah 3 dan 4 sampai label tetap atau 100 iterasi. Pilih k dengan silhouette SBD tertinggi."],
+           [(r"NCC_c(x,y)=\max_w\frac{CC_w(x,y)}{\|x\|\,\|y\|},\quad CC_w=\sum_l x_{l+w-m}\,y_l",
+             "Korelasi silang ternormalisasi untuk semua pergeseran w, dihitung dengan FFT."),
+            (r"SBD(x,y)=1-NCC_c(x,y)", "Shape-Based Distance, bernilai 0 sampai 2."),
+            (r"\mu^*=\arg\max_\mu\frac{\mu^\top Q S Q\,\mu}{\mu^\top\mu},\; S=\sum_{x\in C}xx^\top,\; Q=I-\tfrac1m\mathbf 1\mathbf 1^\top",
+             "Centroid adalah vektor eigen dengan nilai eigen terbesar dari QSQ.")]),
+}
+
+
+def page_method(m):
+    key = {"dtw": "dtw", "ddtw": "ddtw", "ks": "kshape"}[m]
+    s, k, w = best(key)
+    head(NM[m], ALGO[m][0])
+    sz = S[CL[m]].value_counts().sort_index()
+    c = st.columns(3)
+    kpi(c[0], f"{s:.4f}", "Silhouette terbaik")
+    kpi(c[1], f"{k}" + (f" · radius {w}" if w is not None else ""), "Jumlah cluster")
+    kpi(c[2], " / ".join(str(v) for v in sz), "Produk per cluster")
+    st.write("")
+    t1, t2, t3, t4 = st.tabs(["Algoritma dan rumus", "Pola cluster", "Pemilihan parameter", "Profil cluster"])
+    with t1:
+        a, b = st.columns(2)
+        with a:
+            st.subheader("Langkah algoritma")
+            for i, t in enumerate(ALGO[m][1], 1):
+                st.markdown(f"{i}. {t}")
+        with b:
+            st.subheader("Rumus")
+            for lt, ex in ALGO[m][2]:
+                st.latex(lt); st.caption(ex)
+    with t2:
+        a, b = st.columns(2)
+        fig = go.Figure()
+        for c_ in (1, 2):
+            sel = X[S[CL[m]] == c_]
+            fig.add_scatter(x=list(range(1, M + 1)), y=sel.mean(0), name=f"Cluster {c_}: {label(m, c_)} ({len(sel)})",
+                            line=dict(color=COL[c_], width=2.5))
+        a.subheader("Rata-rata penjualan per cluster")
+        a.plotly_chart(style(fig.update_layout(xaxis_title="Minggu", yaxis_title="Unit")), use_container_width=True)
+        pat = D["kshape_centroids"] if m == "ks" else D[f"medoid_patterns_{m}"]
+        b.subheader("Centroid (z-score)" if m == "ks" else "Medoid tiap cluster (z-score)")
+        if pat is not None:
+            fig = go.Figure()
+            for i in range(min(2, len(pat))):
+                nm = f"Centroid {i + 1}"
+                if m != "ks" and D["medoids"] is not None:
+                    r = D["medoids"][(D["medoids"]["Cluster"] == i + 1) &
+                                     (D["medoids"]["Metode"].str.contains(m.upper(), case=False))]
+                    nm = f"Medoid {r['Product_Code'].iloc[0]}" if len(r) else f"Medoid {i + 1}"
+                fig.add_scatter(x=list(range(1, len(pat[i]) + 1)), y=pat[i], name=nm, line=dict(color=COL[i + 1], width=2.2))
+            b.plotly_chart(style(fig.update_layout(xaxis_title="Minggu", yaxis_title="z-score")), use_container_width=True)
+        if D["proj"] is not None and f"{ {'dtw':'DTW','ddtw':'DDTW','ks':'KShape'}[m] }_x" in D["proj"].columns:
+            p = {"dtw": "DTW", "ddtw": "DDTW", "ks": "KShape"}[m]
+            st.subheader("Peta jarak 2D (MDS klasik)")
+            fig = go.Figure()
+            for c_ in (1, 2):
+                sel = S[CL[m]] == c_
+                fig.add_scatter(x=D["proj"][f"{p}_x"][sel], y=D["proj"][f"{p}_y"][sel], mode="markers",
+                                name=f"Cluster {c_}", marker=dict(color=COL[c_], size=6, opacity=.55),
+                                text=S["Product_Code"][sel])
+            st.plotly_chart(style(fig, 420), use_container_width=True)
+    with t3:
+        ev = D["evaluation_" + key]; kc = D.get("k_curve_" + key)
+        if ev is not None and "window" in ev.columns:
+            st.subheader("Silhouette menurut radius Sakoe-Chiba")
+            fig = go.Figure()
+            for kk, g in ev.groupby("k"):
+                g = g.sort_values("window")
+                fig.add_scatter(x=g["window"], y=g["silhouette"], name=f"k={kk}", mode="lines")
+            fig.add_vline(x=w, line_dash="dash", line_color="#c0392b", annotation_text=f"terbaik: {w}")
+            st.plotly_chart(style(fig.update_layout(xaxis_title="Radius (minggu)", yaxis_title="Silhouette"), 380),
+                            use_container_width=True)
+        tab = kc if kc is not None else ev
+        if tab is not None:
+            st.subheader("Pemilihan k")
+            st.dataframe(tab.drop(columns=[c for c in ["Metode", "window", "band_percentage"] if c in tab.columns])
+                         .round(4), hide_index=True, use_container_width=True)
+    with t4:
+        cols = [c for c in ["mean", "total_sales", "trend_slope", "cv", "zero_proportion", "acf_1", "acf_13",
+                            "skewness", "peak_strength"] if c in FE.columns]
+        pr = FE.groupby(CL[m])[cols].mean().T
+        pr.columns = [f"Cluster {c_}: {label(m, c_)}" for c_ in pr.columns]
+        pr.loc["jumlah produk"] = FE[CL[m]].value_counts().sort_index().values
+        st.dataframe(pr.round(3), use_container_width=True)
+        st.markdown('<div class="note">Silhouette di bawah 0,25 berarti batas antar-cluster tidak tegas. Hasil lebih '
+                    'tepat dibaca sebagai segmentasi pola dominan (volume dan intermitensi), bukan kelompok terpisah.</div>',
+                    unsafe_allow_html=True)
+
+
+def page_banding():
+    head("Perbandingan tiga metode",
+         "Silhouette tiap metode dihitung pada matriks jaraknya sendiri. Di sini setiap pengelompokan dievaluasi pada "
+         "ketiga matriks jarak yang sama, lalu kesepakatan antar-metode diukur dengan Adjusted Rand Index.")
+    a, b = st.columns(2)
+    for col, key, ttl, sc in [(a, "cross_silhouette", "Silhouette pada matriks yang sama", "Blues"),
+                              (b, "ari", "Adjusted Rand Index", "Blues")]:
+        df = D[key]
+        if df is None:
+            continue
+        df = df.drop(columns=[c for c in ["k"] if c in df.columns])
+        fig = go.Figure(go.Heatmap(z=df.values, x=list(df.columns), y=list(df.index), colorscale=sc,
+                                   text=np.round(df.values, 3), texttemplate="%{text}"))
+        col.subheader(ttl); col.plotly_chart(style(fig, 330), use_container_width=True)
+
+
+def page_produk():
+    head("Jelajah produk", "Cari kode produk, saring berdasarkan cluster, lalu pilih produk untuk melihat deretnya.")
+    a, b, c = st.columns([2, 2, 2])
+    q = a.text_input("Cari kode produk", "")
+    m = b.selectbox("Metode", list(NM), format_func=NM.get)
+    cl = c.selectbox("Cluster", ["Semua", 1, 2])
+    df = S[["Product_Code"] + list(CL.values())].copy()
+    if q:
+        df = df[df["Product_Code"].str.contains(q, case=False)]
+    if cl != "Semua":
+        df = df[df[CL[m]] == cl]
+    if df.empty:
+        st.info("Tidak ada produk yang cocok. Ubah kata kunci atau filter cluster."); return
+    pick = st.selectbox("Produk", df["Product_Code"].tolist())
+    i = S.index[S["Product_Code"] == pick][0]
+    fig = go.Figure(go.Scatter(x=list(range(1, M + 1)), y=X[i], mode="lines+markers", line=dict(color=INK, width=2)))
+    st.plotly_chart(style(fig.update_layout(title=pick, xaxis_title="Minggu", yaxis_title="Unit")), use_container_width=True)
+    st.caption(f"{pick}: DTW cluster {S.at[i, 'Cluster_DTW']}, DDTW cluster {S.at[i, 'Cluster_DDTW']}, "
+               f"K-Shape cluster {S.at[i, 'Cluster_KShape']}. Rata-rata {X[i].mean():.2f} unit per minggu.")
+    st.dataframe(df.head(200), hide_index=True, use_container_width=True)
+
+
+def page_rumus():
+    head("Rumus evaluasi dan unduh data", "Ukuran yang dipakai untuk memilih parameter dan membandingkan metode.")
+    a, b = st.columns(2)
+    with a:
+        st.subheader("Silhouette")
+        st.latex(r"s(i)=\frac{b(i)-a(i)}{\max\{a(i),b(i)\}}")
+        st.caption("a(i): rata-rata jarak ke anggota cluster sendiri. b(i): rata-rata jarak ke cluster terdekat lain.")
+        st.subheader("Davies-Bouldin")
+        st.latex(r"DB=\frac1k\sum_i\max_{j\ne i}\frac{S_i+S_j}{d(m_i,m_j)}")
+        st.caption("S_i: rata-rata jarak anggota ke medoid. Makin kecil makin baik.")
+        st.subheader("Cost (elbow)")
+        st.latex(r"TD=\sum_i\min_{m\in M}d(x_i,m)")
+    with b:
+        st.subheader("Adjusted Rand Index")
+        st.latex(r"ARI=\frac{\sum_{ij}\binom{n_{ij}}2-E}{\frac12\left[\sum_i\binom{a_i}2+\sum_j\binom{b_j}2\right]-E}")
+        st.latex(r"E=\frac{\sum_i\binom{a_i}2\sum_j\binom{b_j}2}{\binom n2}")
+        st.subheader("Fitur profil")
+        st.latex(r"CV=\frac{\sigma}{\mu},\qquad \rho_k=\frac{\sum_t(x_t-\mu)(x_{t+k}-\mu)}{\sum_t(x_t-\mu)^2}")
+        st.latex(r"x_t=\beta_0+\beta_1 t\ \Rightarrow\ \text{tren}=\beta_1,\qquad \text{peak}=\frac{\max-\text{median}}{\sigma}")
+    st.subheader("Unduh data")
+    st.download_button("sales_clusters.csv", S.to_csv(index=False), "sales_clusters.csv", "text/csv")
+    st.download_button("product_features.csv", F.to_csv(index=False), "product_features.csv", "text/csv")
+
+
+PAGES = {"Ringkasan": page_ringkasan, "Data": page_data, NM["dtw"]: lambda: page_method("dtw"),
+         NM["ddtw"]: lambda: page_method("ddtw"), NM["ks"]: lambda: page_method("ks"),
+         "Perbandingan": page_banding, "Jelajah produk": page_produk, "Rumus dan unduh": page_rumus}
+st.sidebar.markdown("### Time Series Clustering")
+PAGES[st.sidebar.radio("Navigasi", list(PAGES), label_visibility="collapsed")]()
