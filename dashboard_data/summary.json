@@ -1,0 +1,19 @@
+{
+  "n_products": 811,
+  "n_weeks": 52,
+  "dtw": {
+    "window": 13,
+    "k": 2,
+    "silhouette": 0.1300130572953302
+  },
+  "ddtw": {
+    "window": 35,
+    "k": 2,
+    "silhouette": 0.10669166976077551,
+    "paper_window": 10
+  },
+  "kshape": {
+    "k": 2,
+    "silhouette": 0.09820348488885641
+  }
+}
